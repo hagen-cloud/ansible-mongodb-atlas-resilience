@@ -1,0 +1,42 @@
+---
+- name: Validate common resilience test variables
+  ansible.builtin.assert:
+    that:
+      - resilience_test in ['primary_failover', 'regional_outage']
+      - project_name | length > 0
+      - project_name | length <= 64
+      - cluster_name | length > 0
+      - atlas_poll_interval_seconds | int > 0
+      - atlas_poll_retries | int > 0
+      - not ansible_check_mode
+    fail_msg: >-
+      Invalid input. resilience_test must be primary_failover or regional_outage,
+      project_name and cluster_name are required, project_name must contain at most
+      64 characters, and check mode is not supported for resilience actions.
+    success_msg: Common resilience test inputs validated
+
+- name: Validate execution confirmation
+  ansible.builtin.assert:
+    that:
+      - >-
+        (resilience_test == 'regional_outage' and outage_state == 'absent' and
+        confirmation == 'END_OUTAGE_SIMULATION') or
+        ((resilience_test == 'primary_failover' or outage_state == 'started') and
+        confirmation == 'RUN_RESILIENCE_TEST')
+    fail_msg: >-
+      Use confirmation=RUN_RESILIENCE_TEST to start a test or
+      confirmation=END_OUTAGE_SIMULATION to end an outage simulation.
+    success_msg: Explicit resilience test confirmation validated
+
+- name: Validate regional outage variables
+  ansible.builtin.assert:
+    that:
+      - outage_state in ['started', 'absent']
+      - simulation_duration_days | int in [1, 3, 7]
+      - outage_state == 'absent' or outage_regions | length > 0
+      - allow_majority_outage | string | lower in ['true', 'false']
+    fail_msg: >-
+      Regional outage requires outage_state started or absent, a simulation duration
+      of 1, 3, or 7 days, and at least one Atlas Azure region in the target topology when starting.
+    success_msg: Regional outage inputs validated
+  when: resilience_test == 'regional_outage'

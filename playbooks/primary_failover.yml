@@ -1,0 +1,9 @@
+---
+- name: Test MongoDB Atlas primary failover
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    resilience_test: primary_failover
+  roles:
+    - role: mongodb_atlas_resilience

@@ -1,0 +1,30 @@
+---
+atlas_base_url: https://cloud.mongodb.com
+atlas_api_version: "2025-03-12"
+atlas_verify_tls: true
+atlas_request_timeout_seconds: 60
+
+atlas_access_token: "{{ lookup('env', 'MONGODB_ATLAS_ACCESS_TOKEN') }}"
+atlas_client_id: "{{ lookup('env', 'MONGODB_ATLAS_CLIENT_ID') }}"
+atlas_client_secret: "{{ lookup('env', 'MONGODB_ATLAS_CLIENT_SECRET') }}"
+atlas_public_key: "{{ lookup('env', 'MONGODB_ATLAS_PUBLIC_KEY') }}"
+atlas_private_key: "{{ lookup('env', 'MONGODB_ATLAS_PRIVATE_KEY') }}"
+
+resilience_test: ""
+project_name: ""
+project_id: ""
+cluster_name: ""
+confirmation: ""
+
+outage_state: started
+outage_regions: []
+# Empty means any Azure region present in the target topology.
+# Set an explicit allowlist to constrain operator selections.
+atlas_allowed_outage_regions: []
+simulation_duration_days: 3
+allow_majority_outage: false
+
+atlas_poll_interval_seconds: 30
+atlas_poll_retries: 50
+failover_event_poll_interval_seconds: 10
+failover_event_poll_retries: 60

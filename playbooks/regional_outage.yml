@@ -1,0 +1,9 @@
+---
+- name: Manage MongoDB Atlas regional outage simulation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    resilience_test: regional_outage
+  roles:
+    - role: mongodb_atlas_resilience

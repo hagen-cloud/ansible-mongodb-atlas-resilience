@@ -1,0 +1,159 @@
+---
+- name: Read MongoDB Atlas processes before primary failover
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/processes?includeCount=true&itemsPerPage=500"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_processes_before
+  changed_when: false
+  no_log: true
+
+- name: Summarize MongoDB Atlas processes before primary failover
+  ansible.builtin.set_fact:
+    _atlas_process_summary_before: >-
+      {{ _atlas_processes_before.json.results |
+      default([]) | atlas_cluster_process_summary(cluster_name) }}
+
+- name: Validate MongoDB Atlas processes before primary failover
+  ansible.builtin.assert:
+    that:
+      - _atlas_process_summary_before.healthy
+      - _atlas_process_summary_before.replicaSetCount | int > 0
+      - >-
+        _atlas_process_summary_before.primaryHosts | length ==
+        _atlas_process_summary_before.replicaSetCount | int
+    fail_msg: >-
+      Cluster {{ cluster_name }} does not have exactly one healthy primary per replica set.
+      Resolve process health before testing failover.
+    success_msg: >-
+      Cluster {{ cluster_name }} has one healthy primary in each of
+      {{ _atlas_process_summary_before.replicaSetCount }} replica sets
+
+- name: Record primary failover request time
+  ansible.builtin.set_fact:
+    _atlas_failover_requested_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+- name: Start MongoDB Atlas primary failover test
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/restartPrimaries"
+    method: POST
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    body_format: json
+    body: {}
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_failover_request
+  changed_when: true
+  no_log: true
+
+- name: Wait for MongoDB Atlas cluster update completion
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/events?clusterNames={{ cluster_name | urlencode }}&eventType=CLUSTER_UPDATE_COMPLETED&minDate={{ _atlas_failover_requested_at | urlencode }}&includeCount=true&itemsPerPage=100"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_failover_events
+  changed_when: false
+  until:
+    - _atlas_failover_events.status | default(0) == 200
+    - _atlas_failover_events.json.totalCount | default(0) | int > 0
+  retries: "{{ failover_event_poll_retries }}"
+  delay: "{{ failover_event_poll_interval_seconds }}"
+  no_log: true
+
+- name: Wait for new MongoDB Atlas primaries
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/processes?includeCount=true&itemsPerPage=500"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_processes_after
+  changed_when: false
+  until:
+    - >-
+      (_atlas_processes_after.json.results | default([]) |
+      atlas_cluster_process_summary(cluster_name)).healthy
+    - >-
+      (_atlas_processes_after.json.results | default([]) |
+      atlas_cluster_process_summary(cluster_name)).replicaSetCount | int ==
+      _atlas_process_summary_before.replicaSetCount | int
+    - >-
+      (_atlas_processes_after.json.results | default([]) |
+      atlas_cluster_process_summary(cluster_name)).primaryHosts | length ==
+      _atlas_process_summary_before.primaryHosts | length
+    - >-
+      ((_atlas_processes_after.json.results | default([]) |
+      atlas_cluster_process_summary(cluster_name)).primaryHosts |
+      intersect(_atlas_process_summary_before.primaryHosts) | length) == 0
+  retries: "{{ atlas_poll_retries }}"
+  delay: "{{ atlas_poll_interval_seconds }}"
+  no_log: true
+
+- name: Summarize MongoDB Atlas processes after primary failover
+  ansible.builtin.set_fact:
+    _atlas_process_summary_after: >-
+      {{ _atlas_processes_after.json.results |
+      default([]) | atlas_cluster_process_summary(cluster_name) }}
+
+- name: Wait for target cluster to return to IDLE
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_cluster_recovered
+  changed_when: false
+  until:
+    - _atlas_cluster_recovered.status | default(0) == 200
+    - _atlas_cluster_recovered.json.stateName | default('') == 'IDLE'
+  retries: "{{ atlas_poll_retries }}"
+  delay: "{{ atlas_poll_interval_seconds }}"
+  no_log: true
+
+- name: Publish primary failover result
+  ansible.builtin.set_stats:
+    data:
+      mongodb_atlas_resilience:
+        test: primary_failover
+        project_name: "{{ project_name }}"
+        project_id: "{{ project_id }}"
+        cluster_name: "{{ cluster_name }}"
+        requested_at: "{{ _atlas_failover_requested_at }}"
+        cluster_update_completed_events: "{{ _atlas_failover_events.json.totalCount | int }}"
+        replica_set_count: "{{ _atlas_process_summary_after.replicaSetCount }}"
+        primary_count: "{{ _atlas_process_summary_after.primaryHosts | length }}"
+        primary_changed: true
+        cluster_state: "{{ _atlas_cluster_recovered.json.stateName }}"
+        status: succeeded
+    per_host: false
+    aggregate: false

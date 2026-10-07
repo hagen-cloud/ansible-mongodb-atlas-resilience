@@ -1,0 +1,5 @@
+---
+# Preserve the existing public inputs and internal fact names during adoption.
+# All other variable naming checks remain enabled.
+skip_list:
+  - var-naming[no-role-prefix]

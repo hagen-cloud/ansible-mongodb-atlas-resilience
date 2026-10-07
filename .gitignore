@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.cache/
+.ansible/
+.env
+.env.*
+*.retry
+*.log
+local-vars*.yml
+local-vars*.yaml

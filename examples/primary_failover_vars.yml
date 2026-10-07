@@ -1,0 +1,4 @@
+---
+project_name: example-project
+cluster_name: example-cluster
+confirmation: RUN_RESILIENCE_TEST

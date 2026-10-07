@@ -1,0 +1,5 @@
+---
+project_name: example-project
+cluster_name: example-cluster
+confirmation: END_OUTAGE_SIMULATION
+outage_state: absent

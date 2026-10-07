@@ -1,0 +1,28 @@
+---
+- name: Read target MongoDB Atlas cluster
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: atlas_cluster_response
+  changed_when: false
+  no_log: true
+
+- name: Validate target cluster readiness
+  ansible.builtin.assert:
+    that:
+      - atlas_cluster_response.json.stateName == 'IDLE'
+      - >-
+        (atlas_cluster_response.json.effectiveReplicationSpecs |
+        default(atlas_cluster_response.json.replicationSpecs, true) | length) > 0
+    fail_msg: >-
+      Cluster {{ cluster_name }} is not IDLE or does not expose an effective
+      replication topology. Complete pending Atlas operations before testing resilience.
+    success_msg: "Cluster {{ cluster_name }} is IDLE and exposes its replication topology"

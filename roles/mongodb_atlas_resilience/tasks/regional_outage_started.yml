@@ -1,0 +1,131 @@
+---
+- name: Map selected Azure regions to Atlas outage filters
+  ansible.builtin.set_fact:
+    _atlas_outage_filters: "{{ outage_regions | atlas_azure_outage_filters(atlas_allowed_outage_regions) }}"
+    _atlas_outage_expiration_date: "{{ simulation_duration_days | atlas_expiration_date }}"
+
+- name: Classify regional outage impact
+  ansible.builtin.set_fact:
+    _atlas_outage_classification: >-
+      {{ atlas_cluster_response.json.effectiveReplicationSpecs |
+      default(atlas_cluster_response.json.replicationSpecs, true) |
+      atlas_classify_outage(_atlas_outage_filters) }}
+
+- name: Validate regional outage impact
+  ansible.builtin.assert:
+    that:
+      - _atlas_outage_classification.unknownFilters | length == 0
+      - _atlas_outage_classification.affectedElectableNodes | int > 0
+      - >-
+        _atlas_outage_classification.scope != 'majority' or
+        allow_majority_outage | bool
+    fail_msg: >-
+      Outage filters do not match the effective topology or would remove quorum.
+      Set allow_majority_outage=true only after explicit operator approval.
+    success_msg: >-
+      Regional outage classified as {{ _atlas_outage_classification.scope }}:
+      {{ _atlas_outage_classification.affectedElectableNodes }} of
+      {{ _atlas_outage_classification.totalElectableNodes }} electable nodes affected
+
+- name: Read existing regional outage simulation
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/outageSimulation"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code:
+      - 200
+      - 404
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_existing_outage
+  changed_when: false
+  no_log: true
+
+- name: Normalize existing regional outage filters
+  ansible.builtin.set_fact:
+    _atlas_existing_outage_filters: >-
+      {{ _atlas_existing_outage.json.outageFilters | atlas_normalize_outage_filters }}
+  when: _atlas_existing_outage.status == 200
+
+- name: Validate existing regional outage simulation
+  ansible.builtin.assert:
+    that:
+      - _atlas_existing_outage_filters == _atlas_outage_filters
+      - _atlas_existing_outage.json.state in ['START_REQUESTED', 'STARTING', 'SIMULATING']
+    fail_msg: >-
+      A different or terminal outage simulation already exists for {{ cluster_name }}.
+      End it explicitly before starting another simulation.
+    success_msg: Existing compatible regional outage simulation will be reused
+  when: _atlas_existing_outage.status == 200
+
+- name: Start regional outage simulation
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/outageSimulation"
+    method: POST
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    body_format: json
+    body:
+      outageFilters: "{{ _atlas_outage_filters }}"
+      expirationDate: "{{ _atlas_outage_expiration_date }}"
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_outage_start
+  when: _atlas_existing_outage.status == 404
+  changed_when: true
+  no_log: true
+
+- name: Wait for regional outage simulation to become active
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/outageSimulation"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_outage_active
+  changed_when: false
+  until: _atlas_outage_active.json.state | default('') in ['SIMULATING', 'FAILED']
+  retries: "{{ atlas_poll_retries }}"
+  delay: "{{ atlas_poll_interval_seconds }}"
+  no_log: true
+
+- name: Validate regional outage simulation start
+  ansible.builtin.assert:
+    that:
+      - _atlas_outage_active.json.state == 'SIMULATING'
+    fail_msg: "Regional outage simulation entered FAILED state"
+    success_msg: Regional outage simulation is active
+
+- name: Publish regional outage start result
+  ansible.builtin.set_stats:
+    data:
+      mongodb_atlas_resilience:
+        test: regional_outage
+        action: started
+        project_name: "{{ project_name }}"
+        project_id: "{{ project_id }}"
+        cluster_name: "{{ cluster_name }}"
+        selected_regions: "{{ outage_regions }}"
+        simulation_id: "{{ _atlas_outage_active.json.id }}"
+        simulation_state: "{{ _atlas_outage_active.json.state }}"
+        expiration_date: "{{ _atlas_outage_active.json.expirationDate }}"
+        outage_scope: "{{ _atlas_outage_classification.scope }}"
+        total_electable_nodes: "{{ _atlas_outage_classification.totalElectableNodes }}"
+        affected_electable_nodes: "{{ _atlas_outage_classification.affectedElectableNodes }}"
+        replication_spec_impacts: "{{ _atlas_outage_classification.replicationSpecImpacts }}"
+        status: succeeded
+    per_host: false
+    aggregate: false

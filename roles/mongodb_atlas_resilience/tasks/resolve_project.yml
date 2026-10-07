@@ -1,0 +1,33 @@
+---
+- name: Resolve MongoDB Atlas project by name
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/byName/{{ project_name | urlencode }}"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code:
+      - 200
+      - 404
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: atlas_project_response
+  changed_when: false
+  no_log: true
+
+- name: Validate resolved MongoDB Atlas project
+  ansible.builtin.assert:
+    that:
+      - atlas_project_response.status == 200
+      - (atlas_project_response.json | default({})).name | default('') == project_name
+      - (atlas_project_response.json | default({})).id | default('') is match('^[0-9a-fA-F]{24}$')
+    fail_msg: >-
+      MongoDB Atlas project '{{ project_name }}' was not found or returned an invalid ID.
+      Verify the exact project name and service-account access.
+    success_msg: "MongoDB Atlas project '{{ project_name }}' resolved successfully"
+
+- name: Store resolved MongoDB Atlas project ID
+  ansible.builtin.set_fact:
+    project_id: "{{ atlas_project_response.json.id }}"

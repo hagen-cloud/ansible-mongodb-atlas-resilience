@@ -1,0 +1,29 @@
+---
+- name: Validate resilience test inputs
+  ansible.builtin.import_tasks: validate_inputs.yml
+
+- name: Authenticate to MongoDB Atlas
+  ansible.builtin.import_tasks: authenticate.yml
+
+- name: Resolve MongoDB Atlas project ID
+  ansible.builtin.import_tasks: resolve_project.yml
+
+- name: Read and validate the target cluster
+  ansible.builtin.import_tasks: get_cluster.yml
+  when: resilience_test == 'primary_failover' or outage_state == 'started'
+
+- name: Run primary failover test
+  ansible.builtin.include_tasks: primary_failover.yml
+  when: resilience_test == 'primary_failover'
+
+- name: Start or reconcile regional outage simulation
+  ansible.builtin.include_tasks: regional_outage_started.yml
+  when:
+    - resilience_test == 'regional_outage'
+    - outage_state == 'started'
+
+- name: End regional outage simulation
+  ansible.builtin.include_tasks: regional_outage_absent.yml
+  when:
+    - resilience_test == 'regional_outage'
+    - outage_state == 'absent'

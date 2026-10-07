@@ -1,0 +1,38 @@
+---
+name: Validate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: '*requirements.txt'
+      - name: Install pinned validation dependencies
+        run: python -m pip install -r runtime-requirements.txt -r test-requirements.txt
+      - name: Unit and loopback integration tests
+        run: python -m unittest discover -s tests -v
+      - name: Check all entry points
+        run: |
+          ansible-playbook --syntax-check site.yml
+          ansible-playbook --syntax-check playbooks/primary_failover.yml
+          ansible-playbook --syntax-check playbooks/regional_outage.yml
+          ansible-playbook --syntax-check playbooks/regional_outage_start.yml
+          ansible-playbook --syntax-check playbooks/regional_outage_end.yml
+      - name: YAML lint
+        run: yamllint .
+      - name: Ansible lint
+        run: ansible-lint --offline

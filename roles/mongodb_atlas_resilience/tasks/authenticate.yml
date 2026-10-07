@@ -1,0 +1,83 @@
+---
+- name: Validate MongoDB Atlas authentication inputs
+  ansible.builtin.assert:
+    that:
+      - >-
+        atlas_access_token | length > 0 or
+        (atlas_client_id | length > 0 and atlas_client_secret | length > 0) or
+        (atlas_public_key | length > 0 and atlas_private_key | length > 0)
+    fail_msg: >-
+      Provide MONGODB_ATLAS_ACCESS_TOKEN, OAuth client credentials, or both
+      MONGODB_ATLAS_PUBLIC_KEY and MONGODB_ATLAS_PRIVATE_KEY through environment variables.
+    success_msg: MongoDB Atlas authentication inputs validated
+  no_log: true
+
+- name: Use injected MongoDB Atlas access token
+  ansible.builtin.set_fact:
+    _atlas_auth_mode: bearer
+    _atlas_bearer_token: "{{ atlas_access_token }}"
+  when: atlas_access_token | length > 0
+  no_log: true
+
+- name: Request short-lived MongoDB Atlas OAuth token
+  ansible.builtin.uri:
+    url: "{{ atlas_base_url }}/api/oauth/token"
+    method: POST
+    url_username: "{{ atlas_client_id }}"
+    url_password: "{{ atlas_client_secret }}"
+    force_basic_auth: true
+    body_format: form-urlencoded
+    body:
+      grant_type: client_credentials
+    headers:
+      Accept: application/json
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_oauth_response
+  when:
+    - atlas_access_token | length == 0
+    - atlas_client_id | length > 0
+    - atlas_client_secret | length > 0
+  changed_when: false
+  no_log: true
+
+- name: Store short-lived MongoDB Atlas OAuth token
+  ansible.builtin.set_fact:
+    _atlas_auth_mode: bearer
+    _atlas_bearer_token: "{{ _atlas_oauth_response.json.access_token }}"
+  when:
+    - atlas_access_token | length == 0
+    - atlas_client_id | length > 0
+    - atlas_client_secret | length > 0
+  no_log: true
+
+- name: Use MongoDB Atlas API key with HTTP Digest
+  ansible.builtin.set_fact:
+    _atlas_auth_mode: digest
+  when:
+    - atlas_access_token | length == 0
+    - atlas_client_id | length == 0 or atlas_client_secret | length == 0
+    - atlas_public_key | length > 0
+    - atlas_private_key | length > 0
+  no_log: true
+
+- name: Build protected MongoDB Atlas API context
+  ansible.builtin.set_fact:
+    atlas_api_url: "{{ atlas_base_url }}/api/atlas/v2"
+    atlas_headers: >-
+      {{
+        {
+          'Accept': 'application/vnd.atlas.' ~ atlas_api_version ~ '+json',
+          'Content-Type': 'application/json'
+        }
+        | combine(
+            {'Authorization': 'Bearer ' ~ (_atlas_bearer_token | default(''))}
+            if _atlas_auth_mode == 'bearer'
+            else {}
+          )
+      }}
+    atlas_uri_username: "{{ atlas_public_key if _atlas_auth_mode == 'digest' else '' }}"
+    atlas_uri_password: "{{ atlas_private_key if _atlas_auth_mode == 'digest' else '' }}"
+  no_log: true

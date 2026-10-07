@@ -1,0 +1,146 @@
+---
+- name: Read regional outage simulation before cleanup
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/outageSimulation"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code:
+      - 200
+      - 404
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_outage_before_cleanup
+  changed_when: false
+  no_log: true
+
+- name: Wait for a starting outage simulation to become deletable
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/outageSimulation"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code:
+      - 200
+      - 404
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_outage_deletable
+  when:
+    - _atlas_outage_before_cleanup.status == 200
+    - _atlas_outage_before_cleanup.json.state in ['START_REQUESTED', 'STARTING']
+  changed_when: false
+  until: >-
+    _atlas_outage_deletable.status | default(0) == 404 or
+    _atlas_outage_deletable.json.state | default('') in
+    ['SIMULATING', 'COMPLETE', 'FAILED']
+  retries: "{{ atlas_poll_retries }}"
+  delay: "{{ atlas_poll_interval_seconds }}"
+  no_log: true
+
+- name: Select effective regional outage state for cleanup
+  ansible.builtin.set_fact:
+    _atlas_outage_cleanup_state: >-
+      {{ (_atlas_outage_deletable.json.state | default('ABSENT')
+      if _atlas_outage_deletable is defined and not (_atlas_outage_deletable.skipped | default(false))
+      else _atlas_outage_before_cleanup.json.state | default('ABSENT')) }}
+
+- name: Validate regional outage state before cleanup
+  ansible.builtin.assert:
+    that:
+      - _atlas_outage_cleanup_state != 'FAILED'
+    fail_msg: Regional outage simulation is in FAILED state and cannot be ended safely
+    success_msg: Regional outage simulation is ready for cleanup
+
+- name: End active regional outage simulation
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/outageSimulation"
+    method: DELETE
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_outage_end
+  when: _atlas_outage_cleanup_state == 'SIMULATING'
+  changed_when: true
+  no_log: true
+
+- name: Wait for regional outage recovery to complete
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}/outageSimulation"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code:
+      - 200
+      - 404
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_outage_recovery
+  when: _atlas_outage_before_cleanup.status == 200
+  changed_when: false
+  until: >-
+    _atlas_outage_recovery.status | default(0) == 404 or
+    _atlas_outage_recovery.json.state | default('') in ['DELETED', 'FAILED']
+  retries: "{{ atlas_poll_retries }}"
+  delay: "{{ atlas_poll_interval_seconds }}"
+  no_log: true
+
+- name: Validate regional outage recovery
+  ansible.builtin.assert:
+    that:
+      - >-
+        _atlas_outage_recovery.status | default(0) == 404 or
+        _atlas_outage_recovery.json.state | default('') == 'DELETED'
+    fail_msg: Regional outage recovery entered FAILED state
+    success_msg: Regional outage simulation was removed
+  when: _atlas_outage_before_cleanup.status == 200
+
+- name: Wait for target cluster to return to IDLE after outage
+  ansible.builtin.uri:
+    url: "{{ atlas_api_url }}/groups/{{ project_id }}/clusters/{{ cluster_name | urlencode }}"
+    method: GET
+    headers: "{{ atlas_headers }}"
+    url_username: "{{ atlas_uri_username if _atlas_auth_mode == 'digest' else omit }}"
+    url_password: "{{ atlas_uri_password if _atlas_auth_mode == 'digest' else omit }}"
+    force_basic_auth: false
+    return_content: true
+    status_code: 200
+    timeout: "{{ atlas_request_timeout_seconds }}"
+    validate_certs: "{{ atlas_verify_tls }}"
+  register: _atlas_cluster_after_outage
+  when: _atlas_outage_before_cleanup.status == 200
+  changed_when: false
+  until:
+    - _atlas_cluster_after_outage.status | default(0) == 200
+    - _atlas_cluster_after_outage.json.stateName | default('') == 'IDLE'
+  retries: "{{ atlas_poll_retries }}"
+  delay: "{{ atlas_poll_interval_seconds }}"
+  no_log: true
+
+- name: Publish regional outage cleanup result
+  ansible.builtin.set_stats:
+    data:
+      mongodb_atlas_resilience:
+        test: regional_outage
+        action: absent
+        project_name: "{{ project_name }}"
+        project_id: "{{ project_id }}"
+        cluster_name: "{{ cluster_name }}"
+        previous_state: "{{ _atlas_outage_cleanup_state }}"
+        status: succeeded
+    per_host: false
+    aggregate: false

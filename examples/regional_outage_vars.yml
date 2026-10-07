@@ -1,0 +1,9 @@
+---
+project_name: example-project
+cluster_name: example-cluster
+confirmation: RUN_RESILIENCE_TEST
+outage_state: started
+simulation_duration_days: 3
+allow_majority_outage: false
+outage_regions:
+  - EUROPE_WEST
